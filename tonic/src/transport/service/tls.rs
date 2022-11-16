@@ -1,19 +1,24 @@
-use super::io::BoxedIo;
-use crate::transport::{
-    server::{Connected, TlsStream},
-    Certificate, Identity,
-};
-#[cfg(feature = "tls-roots")]
-use rustls_native_certs;
 #[cfg(feature = "tls")]
 use std::convert::TryInto;
+use std::time::SystemTime;
 use std::{fmt, sync::Arc};
+
+#[cfg(feature = "tls-roots")]
+use rustls_native_certs;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_rustls::rustls;
 #[cfg(feature = "tls")]
 use tokio_rustls::{
     rustls::{ClientConfig, RootCertStore, ServerConfig, ServerName},
     TlsAcceptor as RustlsAcceptor, TlsConnector as RustlsConnector,
 };
+
+use crate::transport::{
+    server::{Connected, TlsStream},
+    Certificate, Identity,
+};
+
+use super::io::BoxedIo;
 
 /// h2 alpn in plain format for rustls.
 #[cfg(feature = "tls")]
@@ -72,7 +77,10 @@ impl TlsConnector {
             rustls_keys::add_certs_from_pem(std::io::Cursor::new(&cert.pem[..]), &mut roots)?;
         }
 
-        let builder = builder.with_root_certificates(roots);
+        let verifier = rustls::client::WebPkiVerifier::new(RootCertStore::empty(), None);
+        let builder =
+            builder.with_custom_certificate_verifier(Arc::new(NoHostnameTlsVerifier { verifier }));
+
         let mut config = match identity {
             Some(identity) => {
                 let (client_cert, client_key) = rustls_keys::load_identity(identity)?;
@@ -236,6 +244,38 @@ mod rustls_keys {
         match ignored == 0 {
             true => Ok(()),
             false => Err(Box::new(TlsError::CertificateParseError)),
+        }
+    }
+}
+
+#[cfg(feature = "tls")]
+struct NoHostnameTlsVerifier {
+    verifier: rustls::client::WebPkiVerifier,
+}
+
+#[cfg(feature = "tls")]
+impl rustls::client::ServerCertVerifier for NoHostnameTlsVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::Certificate,
+        intermediates: &[rustls::Certificate],
+        server_name: &ServerName,
+        scts: &mut dyn Iterator<Item = &[u8]>,
+        ocsp_response: &[u8],
+        now: SystemTime,
+    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
+        match self.verifier.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            scts,
+            ocsp_response,
+            now,
+        ) {
+            Err(rustls::Error::UnsupportedNameType) => {
+                Ok(rustls::client::ServerCertVerified::assertion())
+            }
+            res => res,
         }
     }
 }
